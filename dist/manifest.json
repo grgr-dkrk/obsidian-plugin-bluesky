@@ -1,0 +1,10 @@
+{
+  "id": "obsidian-bluesky-plugin",
+  "name": "Obsidian Bluesky",
+  "version": "0.0.0",
+  "minAppVersion": "0.15.0",
+  "description": "WIP",
+  "author": "grgr-dkrk",
+  "authorUrl": "https://github.com/grgr-dkrk",
+  "isDesktopOnly": false
+}
