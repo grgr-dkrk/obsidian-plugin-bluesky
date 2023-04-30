@@ -6,16 +6,18 @@ import {
   PluginSettingTab,
   Setting,
 } from "obsidian";
-import { BskyAgent } from "@atproto/api";
+import { BskyAgent, Entity, RichText } from "@atproto/api";
 
 type BlueskyPluginSettings = {
   identifier: string;
   appPassword: string;
+  timelineLimit: number;
 };
 
 const DEFAULT_SETTINGS: BlueskyPluginSettings = {
   identifier: ".bsky.social",
   appPassword: "",
+  timelineLimit: 10,
 };
 
 const formatDate = (date: Date) => {
@@ -143,14 +145,35 @@ export default class BlueskyPlugin extends Plugin {
       name: "Add Page of Timeline(experimental)",
       callback: async () => {
         const response = await this.agent.getTimeline({
-          limit: 10,
+          limit: this.settings.timelineLimit,
         });
         if (!response.success) {
           return this.__handleInfoMessage("Failed to get Timeline");
         }
-        const feeds = response.data.feed.map((feed) => {
-          //@ts-ignore
-          return feed.post.record?.text;
+        const feeds = response.data.feed.map((feed, index) => {
+          const { text, createdAt, entities } = feed.post.record as {
+            text: string;
+            createdAt: Date;
+            entities: Entity[];
+          };
+          const rt = new RichText({ text, entities });
+          let markdown = "";
+          for (const segment of rt.segments()) {
+            if (segment.isLink()) {
+              markdown += `[${segment.text}](${segment.link?.uri})`;
+            } else if (segment.isMention()) {
+              markdown += `[${segment.text}](https://my-bsky-app.com/user/${segment.mention?.did})`;
+            } else {
+              markdown += segment.text;
+            }
+          }
+          return `${
+            index > 0 ? "\n---\n" : "\n"
+          }# Posted: ${createdAt.toString()}\n\n## ${
+            feed.post.author.displayName
+          }\n![${feed.post.author.displayName}s icon|80x80](${
+            feed.post.author.avatar
+          })\n${markdown}\n\ncid: ${feed.post.cid}`;
         });
         await this.app.vault.create(
           `timeline_${formatDate(new Date())}.md`,
@@ -222,5 +245,19 @@ class SampleSettingTab extends PluginSettingTab {
           this.app.saveLocalStorage("appPassword", value);
         }),
       );
+
+    new Setting(containerEl)
+      .setName("Timeline messages num")
+      .setDesc(`The number of messages to load at once`)
+      .addSlider((slider) => {
+        slider
+          .setLimits(1, 50, 1)
+          .setDynamicTooltip()
+          .setValue(this.plugin.settings.timelineLimit);
+        return slider.onChange(async (value) => {
+          this.plugin.settings.timelineLimit = value;
+          await this.plugin.saveSettings();
+        });
+      });
   }
 }
