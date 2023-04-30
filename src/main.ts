@@ -6,16 +6,28 @@ import {
   PluginSettingTab,
   Setting,
 } from "obsidian";
-import { BskyAgent } from "@atproto/api";
+import { BskyAgent, Entity, RichText } from "@atproto/api";
 
 type BlueskyPluginSettings = {
   identifier: string;
   appPassword: string;
+  timelineLimit: number;
 };
 
 const DEFAULT_SETTINGS: BlueskyPluginSettings = {
   identifier: ".bsky.social",
   appPassword: "",
+  timelineLimit: 10,
+};
+
+const formatDate = (date: Date) => {
+  const year = date.getFullYear();
+  const month = ("0" + (date.getMonth() + 1)).slice(-2);
+  const day = ("0" + date.getDate()).slice(-2);
+  const hour = ("0" + date.getHours()).slice(-2);
+  const minute = ("0" + date.getMinutes()).slice(-2);
+  const second = ("0" + date.getSeconds()).slice(-2);
+  return `${year}-${month}-${day}-${hour}-${minute}-${second}`;
 };
 
 export default class BlueskyPlugin extends Plugin {
@@ -58,6 +70,30 @@ export default class BlueskyPlugin extends Plugin {
       });
   }
 
+  private async postOfSelection(text: string | null) {
+    if (!this.__checkAuthenticated()) {
+      return;
+    }
+    if (!text || ![...text].length) {
+      this.__handleInfoMessage("texts are not selected");
+      return;
+    }
+
+    this.agent
+      .post({
+        $type: "app.bsky.feed.post",
+        text,
+        facets: [],
+      })
+      .then(() => {
+        this.__handleInfoMessage("Post message succeeded");
+      })
+      .catch((error) => {
+        console.error(error);
+        this.__handleInfoMessage("Failed to post");
+      });
+  }
+
   async onload() {
     await this.loadSettings();
     this.agent = new BskyAgent({ service: "https://bsky.social" });
@@ -68,6 +104,10 @@ export default class BlueskyPlugin extends Plugin {
     if (this.settings.identifier && this.appPassword) {
       this.__login();
     }
+
+    /**
+     * Commands
+     */
 
     /**
      * Login
@@ -87,28 +127,7 @@ export default class BlueskyPlugin extends Plugin {
       id: "post-selection-text",
       name: "Post selection text",
       editorCallback: (editor: Editor) => {
-        if (!this.__checkAuthenticated()) {
-          return;
-        }
-        const text = editor.getSelection();
-        if (![...text].length) {
-          this.__handleInfoMessage("texts are not selected");
-          return;
-        }
-
-        this.agent
-          .post({
-            $type: "app.bsky.feed.post",
-            text,
-            facets: [],
-          })
-          .then(() => {
-            this.__handleInfoMessage("Post message succeeded");
-          })
-          .catch((error) => {
-            console.error(error);
-            this.__handleInfoMessage("Failed to post");
-          });
+        this.postOfSelection(editor.getSelection());
       },
     });
 
@@ -120,6 +139,61 @@ export default class BlueskyPlugin extends Plugin {
         this.appPassword = this.app.saveLocalStorage("appPassword", null);
       },
     });
+
+    this.addCommand({
+      id: "get-timeline-unstable",
+      name: "Add Page of Timeline(experimental)",
+      callback: async () => {
+        const response = await this.agent.getTimeline({
+          limit: this.settings.timelineLimit,
+        });
+        if (!response.success) {
+          return this.__handleInfoMessage("Failed to get Timeline");
+        }
+        const feeds = response.data.feed.map((feed, index) => {
+          const { text, createdAt, entities } = feed.post.record as {
+            text: string;
+            createdAt: Date;
+            entities: Entity[];
+          };
+          const rt = new RichText({ text, entities });
+          let markdown = "";
+          for (const segment of rt.segments()) {
+            if (segment.isLink()) {
+              markdown += `[${segment.text}](${segment.link?.uri})`;
+            } else if (segment.isMention()) {
+              markdown += `[${segment.text}](https://my-bsky-app.com/user/${segment.mention?.did})`;
+            } else {
+              markdown += segment.text;
+            }
+          }
+          return `${
+            index > 0 ? "\n---\n" : "\n"
+          }# Posted: ${createdAt.toString()}\n\n## ${
+            feed.post.author.displayName
+          }\n![${feed.post.author.displayName}s icon|80x80](${
+            feed.post.author.avatar
+          })\n${markdown}\n\ncid: ${feed.post.cid}`;
+        });
+        await this.app.vault.create(
+          `timeline_${formatDate(new Date())}.md`,
+          feeds.join(`\n`),
+        );
+      },
+    });
+
+    /**
+     * Events
+     */
+    this.registerEvent(
+      this.app.workspace.on("editor-menu", (menu) => {
+        menu.addItem((item) => {
+          item.setTitle("Post selection to Bluesky").onClick(() => {
+            this.postOfSelection(getSelection()?.toString() ?? null);
+          });
+        });
+      }),
+    );
   }
 
   onunload() {}
@@ -171,5 +245,19 @@ class SampleSettingTab extends PluginSettingTab {
           this.app.saveLocalStorage("appPassword", value);
         }),
       );
+
+    new Setting(containerEl)
+      .setName("Timeline messages num")
+      .setDesc(`The number of messages to load at once`)
+      .addSlider((slider) => {
+        slider
+          .setLimits(1, 50, 1)
+          .setDynamicTooltip()
+          .setValue(this.plugin.settings.timelineLimit);
+        return slider.onChange(async (value) => {
+          this.plugin.settings.timelineLimit = value;
+          await this.plugin.saveSettings();
+        });
+      });
   }
 }
